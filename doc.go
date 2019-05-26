@@ -1,6 +1,6 @@
-// lab project doc.go
+// geosrv project doc.go
 
 /*
-lab document
+geosrv document
 */
 package main

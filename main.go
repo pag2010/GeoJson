@@ -1,13 +1,19 @@
+// geosrv project main.go
 package main
 
 import (
-	"fmt" // пакет для форматированного ввода вывода
-	// пакет для логирования
-
+	"bytes"
+	"fmt"
+	"html/template"
+	"image"
+	"image/png"
 	"io/ioutil"
 	"math"
-	"math/rand"
+
+	//"math/rand"
+	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/davvo/mercator"
 	"github.com/fogleman/gg"
@@ -15,57 +21,91 @@ import (
 )
 
 const width, height = 256, 256
+const mercatorMaxValue float64 = 20037508.342789244
+const mercatorToCanvasScaleFactorX = float64(width) / (mercatorMaxValue)
+const mercatorToCanvasScaleFactorY = float64(height) / (mercatorMaxValue)
 
-func draw(z, x, y float64) {
+var cache map[string][]byte
+
+func main() {
+	cache = make(map[string][]byte, 0)
+
+	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/tile/", draw)
+
+	http.ListenAndServe(":3000", nil)
+}
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	t, err := template.ParseFiles("./index.html")
+	if err != nil {
+		fmt.Fprintf(w, err.Error())
+	}
+
+	t.ExecuteTemplate(w, "index", "hello")
+}
+
+func draw(w http.ResponseWriter, r *http.Request) {
+
 	var err error
-	var img string
+	var img image.Image
+	var imgBytes []byte
 
 	var featureCollectionJSON []byte
 	var filePath = "rf.geojson"
 
-	if featureCollectionJSON, err = ioutil.ReadFile(filePath); err != nil {
-		fmt.Println(err.Error())
+	key := r.URL.String()
+	keys := strings.Split(key, "/")
+
+	z, err := strconv.ParseFloat(keys[2], 64)
+	x, err := strconv.ParseFloat(keys[3], 64)
+	y, err := strconv.ParseFloat(keys[4], 64)
+
+	if cache[key] != nil {
+		imgBytes = cache[key]
+	} else {
+		if featureCollectionJSON, err = ioutil.ReadFile(filePath); err != nil {
+			fmt.Println(err.Error())
+		}
+
+		if img, err = getPNG(featureCollectionJSON, z, x, y); err != nil {
+			fmt.Println(err.Error())
+		}
+
+		buffer := new(bytes.Buffer)
+		png.Encode(buffer, img)
+		imgBytes = buffer.Bytes()
+		cache[key] = imgBytes
 	}
 
-	if img, err = getPNG(featureCollectionJSON, z, x, y); err != nil {
-		fmt.Println(err.Error())
-	}
-
-	println(img)
+	w.Write(imgBytes)
 }
 
-func main() {
-	var z, x, y float64
-	fmt.Scan(&z, &x, &y)
-	draw(z, x, y)
-}
-
-func getPNG(featureCollectionJSON []byte, z float64, x float64, y float64) (string, error) {
+func getPNG(featureCollectionJSON []byte, z float64, x float64, y float64) (image.Image, error) {
 	var coordinates [][][][][]float64
 	var err error
 
 	if coordinates, err = getMultyCoordinates(featureCollectionJSON); err != nil {
-		return err.Error(), err
+		return nil, err
 	}
 
 	dc := gg.NewContext(width, height)
 	scale := 1.0
 
 	dc.InvertY()
+
 	forEachPolygon(dc, coordinates, func(polygonCoordinates [][]float64) {
-		dc.SetRGB(rand.Float64(), rand.Float64(), rand.Float64())
+		dc.SetRGB(1.0, 0.0, 0.0)
 		drawByPolygonCoordinates(dc, polygonCoordinates, scale, dc.Fill, z, x, y)
 	})
 
 	dc.SetLineWidth(2)
 	forEachPolygon(dc, coordinates, func(polygonCoordinates [][]float64) {
-		dc.SetRGB(rand.Float64(), rand.Float64(), rand.Float64())
+		dc.SetRGB(1.0, 1.0, 1.0)
 		drawByPolygonCoordinates(dc, polygonCoordinates, scale, dc.Stroke, z, x, y)
 	})
 
-	var out = "out.png"
-
-	dc.SavePNG(out)
+	out := dc.Image()
 
 	return out, nil
 }
@@ -93,10 +133,17 @@ func forEachPolygon(dc *gg.Context, coordinates [][][][][]float64, callback func
 	}
 }
 
-const mercatorMaxValue float64 = 20037508.342789244
+func centerRussia(x float64, y float64) (float64, float64) {
+	var west = float64(1635093.15883866)
 
-const mercatorToCanvasScaleFactorX = float64(width) / (mercatorMaxValue)
-const mercatorToCanvasScaleFactorY = float64(height) / (mercatorMaxValue)
+	if x > 0 {
+		x -= west
+	} else {
+		x += 2*mercatorMaxValue - west
+	}
+
+	return x, y
+}
 
 func drawByPolygonCoordinates(dc *gg.Context, coordinates [][]float64, scale float64, method func(), z float64, xTile float64, yTile float64) {
 
@@ -120,18 +167,6 @@ func drawByPolygonCoordinates(dc *gg.Context, coordinates [][]float64, scale flo
 	}
 	dc.ClosePath()
 	method()
-}
-
-func centerRussia(x float64, y float64) (float64, float64) {
-	var west = float64(1635093.15883866)
-
-	if x > 0 {
-		x -= west
-	} else {
-		x += 2*mercatorMaxValue - west
-	}
-
-	return x, y
 }
 
 func convertNegativeX(x float64) float64 {
